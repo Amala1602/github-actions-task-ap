@@ -1,0 +1,79 @@
+name: Task Manager CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+  IMAGE_NAME: task-manager
+  AZURE_WEBAPP_NAME: ${{ vars.AZURE_WEBAPP_NAME }}
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest
+
+      - name: Build Docker image
+        run: docker build -t task-manager:${{ github.sha }} .
+
+      - name: Check Azure deployment configuration
+        id: deployment_config
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        env:
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+          AZURE_WEBAPP_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        run: |
+          if [[ -n "$ACR_LOGIN_SERVER" && -n "$ACR_USERNAME" && -n "$ACR_PASSWORD" && -n "$AZURE_WEBAPP_NAME" && -n "$AZURE_WEBAPP_PUBLISH_PROFILE" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Azure deployment skipped. Configure ACR_LOGIN_SERVER and AZURE_WEBAPP_NAME variables, plus ACR_USERNAME, ACR_PASSWORD, and AZURE_WEBAPP_PUBLISH_PROFILE secrets."
+          fi
+
+      - name: Login to ACR
+        if: steps.deployment_config.outputs.configured == 'true'
+        uses: azure/docker-login@v2
+        with:
+          login-server: ${{ env.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Push Docker image
+        if: steps.deployment_config.outputs.configured == 'true'
+        run: |
+          docker tag task-manager:${{ github.sha }} ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Deploy to Azure Web App
+        if: steps.deployment_config.outputs.configured == 'true'
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          images: ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
